@@ -9,6 +9,8 @@
 #include "MPC.h"
 #include "json.hpp"
 
+using namespace Eigen;
+using namespace std;
 // for convenience
 using json = nlohmann::json;
 
@@ -87,24 +89,58 @@ int main() {
           // j[1] is the data JSON object
           vector<double> ptsx = j[1]["ptsx"];
           vector<double> ptsy = j[1]["ptsy"];
-          double px = j[1]["x"];
-          double py = j[1]["y"];
-          double psi = j[1]["psi"];
-          double v = j[1]["speed"];
-
+          const double px = j[1]["x"];
+          const double py = j[1]["y"];
+          const double psi = j[1]["psi"];
+          const double v_raw = j[1]["speed"]; 
+          const double v = v_raw * 0.447;// mph to m/s
+          const double steering_angle = j[1]["steering_angle"];
+          const double throttle = j[1]["throttle"];
+          
+          const int N = ptsx.size(); // Number of waypoints
+          const double cospsi = cos(-psi);
+          const double sinpsi = sin(-psi);
           /*
-          * TODO: Calculate steering angle and throttle using MPC.
+          * Calculate steering angle and throttle using MPC.
           *
           * Both are in between [-1, 1].
           *
           */
-          double steer_value;
-          double throttle_value;
+          const double dt = DT;
+          const double Lf = LF;
+
+          // Convert to the vehicle coordinate system
+          VectorXd x_veh(N);
+          VectorXd y_veh(N);
+          for(int i = 0; i < N; i++) {
+            const double dx = ptsx[i] - px;
+            const double dy = ptsy[i] - py;
+            x_veh[i] = dx * cospsi - dy * sinpsi;
+            y_veh[i] = dy * cospsi + dx * sinpsi;
+          }
+          auto coeffs = polyfit(x_veh, y_veh, 3); // Fit waypoints
+          const double cte = coeffs[0];
+          const double epsi = -atan(coeffs[1]); //-f'(0)
+          
+          // Kinematic model is used to predict vehicle state at the actual
+          // moment of control (current time + delay dt)
+          const double px_act = v * dt;
+          const double py_act = 0;
+          const double psi_act = - v * steering_angle * dt / Lf;
+          const double v_act = v + throttle * dt;
+          const double cte_act = cte + v * sin(epsi) * dt;
+          const double epsi_act = epsi + psi_act; 
+          VectorXd state(6);
+          state << px_act, py_act, psi_act, v_act, cte_act, epsi_act;
+          vector<double> mpc_results = mpc.Solve(state, coeffs);
+          
+          double steer_value = mpc_results[0]/ deg2rad(25); // convert to [-1..1] range
+          double throttle_value = mpc_results[1];
 
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
-          msgJson["steering_angle"] = steer_value;
+          msgJson["steering_angle"] = -steer_value;
           msgJson["throttle"] = throttle_value;
 
           //Display the MPC predicted trajectory 
@@ -117,12 +153,14 @@ int main() {
           msgJson["mpc_x"] = mpc_x_vals;
           msgJson["mpc_y"] = mpc_y_vals;
 
-          //Display the waypoints/reference line
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
+          vector<double> next_x_vals;
+          vector<double> next_y_vals;
+          for(int i = 0; i<ptsx.size();i++){
+            next_x_vals.push_back(x_veh[i]);
+            next_y_vals.push_back(y_veh[i]);
+          }
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
